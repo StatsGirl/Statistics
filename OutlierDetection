@@ -1,0 +1,345 @@
+*The following macro was created by Breya Walker 5.2.18;
+%macro Ridof(Variable=);
+Data WORK.Temp_&Variable;
+set BRKGVA.zeromissN7 (keep=%unquote(&Variable) AWB Earliest No_SI_EPT);
+if missing(%unquote(&Variable)) then delete; *Rid of missing values;
+run;
+%Mend Ridof;
+
+%Ridof(Variable = CPA_3461);
+%Ridof(Variable = CPA_Index);
+%Ridof(Variable = CPA_SI);
+%Ridof(Variable = FDA_Index);
+%Ridof(Variable = FDA_3461);
+%Ridof(Variable = FDA_SI);
+%Ridof(Variable = GEN_INDEX);
+%Ridof(Variable = GEN_SI);
+%Ridof(Variable = GEN_3461);
+
+
+
+*this macro creates an index for the variables and it stores them for control charts plots x=sequence y= variable;
+%macro obs(dataset=,k=);
+data NewCom&k;
+  set &dataset;
+  count +1;
+  rename count=COL1;
+run;
+%mend obs;
+
+%obs(dataset=Work.Temp_GEN_INDEX, k=1); 
+%obs(dataset=Work.Temp_FDA_INDEX, k=2);
+%obs(dataset=Work.Temp_CPA_INDEX, k=3);
+%obs(dataset=Work.Temp_GEN_3461, k=4);
+%obs(dataset=Work.Temp_FDA_3461, k=5);
+%obs(dataset=Work.Temp_CPA_3461, k=6);
+%obs(dataset=Work.Temp_GEN_SI, k=7);
+%obs(dataset=Work.Temp_FDA_SI, k=8);
+%obs(dataset=Work.Temp_CPA_SI, k=9);
+
+*This macro allows you to identify outliers based on the Mahalanobis distance;
+%macro VarSelect(Nextdataset=,Var=,k=); *Here you will insert your newly created NewCom_i datasets;
+*Select M-Distance and save the observations in a new table;
+/*We will use the Mahalanobis distance to identify outliers in the variables
+this metric is related to the H statistic-which identifies leverage points in the data. Points that have the potential
+of changes estimates because they are so extreme;
+The M distance follows a Chi Square distribution so we calculate the critical point and any observation with a M value above the critical point is an outlier 
+*/
+*M-Distance;
+Proc reg data=&Nextdataset;
+model COL1 = &Var/
+    Selection = Rsquare Collin Vif;
+output out=Disc_out H=H;
+quit;
+* Find outliers;
+* Mahalanobis Distance = (N-1){Hii-1/N} is distributed as
+  chi-square(df) where df = number of predictors;
+proc sql;
+select Count(*) into: Dim
+from &Nextdataset;
+
+quit;
+%put|&Dim|;
+Data Disc_out2;
+Set Disc_Out;
+N =&Dim; *change dynamically;
+* Critical Chi-square with K=1 predictors at alpha .001;
+if (_n_ = 1)then
+  Do;
+    File Print;
+    Critical_Chi = CINV(1-.05,1); *95% percentile;
+    %put "Critical chi-square " Critical_Chi;
+  End;
+* Convert H values to chi-square values for each observation;
+M_Chi2 =  (N-1)*(H-1/N); *M Distance;
+Run;
+
+data temp;
+set Disc_out2;
+where Critical_Chi NE .;
+Num=Critical_Chi;
+run;
+
+proc sql;
+create table Outliers&k as select T1.&Var, T1.NO_SI_EPT, T1.Earliest, T1.COL1 as ColOut, T1.H, T1.M_Chi2 
+from Disc_out2 T1, Temp T2
+where T1.M_Chi2> T2.Num;
+run;
+
+proc sort data= Disc_out2;
+by Col1;
+run;
+
+proc sort data= Outliers&k;
+by Colout;
+run;
+
+PROC SQL;Create Table FinalClean as
+   SELECT T1.*
+      FROM WORK.DISC_OUT2 t1
+           Left JOIN WORK.OUTLIERS&k t2 ON (t1.&Var = t2.&Var)
+      WHERE t1.COL1 NOT IN (Select ColOut from Work.Outliers&k) ;
+QUIT;
+
+proc sort data=FinalClean;
+by Col1;
+run;
+
+data FinalClean&k;
+set FinalClean;
+&Var=input(&Var,best20.);
+drop H--M_Chi2;
+run;
+%mend VarSelect;
+
+
+%VarSelect(Nextdataset=Work.NewCom1,Var=GEN_INDEX, k=1); *Here is where you'd insert the NewCom1 to NewCom(n) datasets that you created using the obs macro;
+%VarSelect(Nextdataset=Work.NewCom2,Var=FDA_INDEX, k=2);
+%VarSelect(Nextdataset=Work.NewCom3,Var=CPA_INDEX, k=3);
+%VarSelect(Nextdataset=Work.NewCom4,Var=GEN_3461, k=4);
+%VarSelect(Nextdataset=Work.NewCom5,Var=FDA_3461, k=5);
+%VarSelect(Nextdataset=Work.NewCom6,Var=CPA_3461, k=6);
+%VarSelect(Nextdataset=Work.NewCom7,Var=GEN_SI, k=7);
+%VarSelect(Nextdataset=Work.NewCom8,Var=FDA_SI, k=8);
+%VarSelect(Nextdataset=Work.NewCom9,Var=CPA_SI, k=9);
+
+*Create 5/18/2018 Breya Walker: The following macro changes the formatting of the data from Hours to numeric so further computations can be performed/variables created;
+%macro Change(Data=,var=,k=);
+data FinalCleanDelta&k;
+set FinalClean&k;
+&var&k=input(put(&var,HOUR11.9),best12.);
+EPT=input(put(NO_SI_EPT,HOUR11.9),best12.);
+WeekNum=Week(Earliest);
+WeekEnding= put(intnx('Week',Earliest,0,'e'),date9.);
+drop &var NO_SI_EPT;
+run;
+%mend Change;
+
+%Change(Data=FinalClean1,var=GEN_Index,k=1);
+%Change(Data=FinalClean2,var=FDA_Index,k=2);
+%Change(Data=FinalClean3,var=CPA_Index,k=3);
+%Change(Data=FinalClean4,var=GEN_3461,k=4);
+%Change(Data=FinalClean5,var=FDA_3461,k=5);
+%Change(Data=FinalClean6,var=CPA_3461,k=6);
+%Change(Data=FinalClean7,var=GEN_SI,k=7);
+%Change(Data=FinalClean8,var=FDA_SI,k=8);
+%Change(Data=FinalClean9,var=CPA_SI,k=9);
+
+*Add in the target goals for each of the variables categories: Index, 3461, SI;
+%macro means(means=, var=);
+proc sort data= &means;
+by WeekNum;
+run;
+
+proc means  data= &means P90 mean;
+by WeekNum;
+var &var;
+output out=Work.P90&Var P90=;
+run;
+%mend means;
+
+
+%means(means=FinalCleanDelta1,var=GEN_INDEX1);
+%means(means=FinalCleanDelta2,var=FDA_INDEX2);
+%means(means=FinalCleanDelta3,var=CPA_INDEX3);
+%means(means=FinalCleanDelta4,var=GEN_34614);
+%means(means=FinalCleanDelta5,var=FDA_34615);
+%means(means=FinalCleanDelta6,var=CPA_34616);
+%means(means=FinalCleanDelta7,var=GEN_SI7);
+%means(means=FinalCleanDelta8,var=FDA_SI8);
+%means(means=FinalCleanDelta9,var=CPA_SI9);
+
+*combined the 90 percentile values with each obs;
+%macro Percentile(data=,var=,k=);
+data N&data;
+set &data;
+drop _freq_ _type_;
+run;
+
+PROC SQL;
+   CREATE TABLE Merged&var AS 
+   SELECT t1.AWB, 
+          t1.EARLIEST, 
+          t1.COL1, 
+          t1.&var, 
+          t1.EPT,
+		t1.WeekEnding, 
+          t1.WeekNum, 
+          t2.&var as P90&var
+      FROM WORK.FINALCLEANDELTA&k t1
+           INNER JOIN N&data t2 ON (t1.WeekNum = t2.WeekNum)
+      WHERE t1.WeekNum = t2.WeekNum;
+QUIT;
+%mend Percentile;
+
+%Percentile(data=P90GEN_INDEX1, var=GEN_INDEX1, k=1);
+%Percentile(data=P90FDA_INDEX2, var=FDA_INDEX2, k=2);
+%Percentile(data=P90CPA_INDEX3, var=CPA_INDEX3, k=3);
+%Percentile(data=P90GEN_34614, var=GEN_34614, k=4);
+%Percentile(data=P90FDA_34615, var=FDA_34615, k=5);
+%Percentile(data=P90CPA_34616, var=CPA_34616, k=6);
+%Percentile(data=P90GEN_SI7, var=GEN_SI7, k=7);
+%Percentile(data=P90FDA_SI8, var=FDA_SI8, k=8);
+%Percentile(data=P90CPA_SI9, var=CPA_SI9, k=9);
+
+*Create obs for sequence plotting;
+%macro Countobs(data=);
+proc sort data=&data;
+by weekNum;
+run;
+ 
+data &data;
+  set &data;
+  count +1;
+  by weekNum;
+  if first.weekNum then count=1;
+run;
+%mend Countobs;
+
+%Countobs(data=MergedGen_Index1);
+%Countobs(data=MergedGEN_34614);
+%Countobs(data=MergedGEN_SI7);
+%Countobs(data=MergedFDA_INDEX2);
+%Countobs(data=MergedFDA_34615);
+%Countobs(data=MergedFDA_SI8);
+%Countobs(data=MergedCPA_Index3);
+%Countobs(data=MergedCPA_34616);
+%Countobs(data=MergedCPA_SI9);
+
+*Create the total EPT dataset for each Variable: GEN, CPA, FDA;
+*GEN;
+PROC SQL;
+   CREATE TABLE EPT_GEN AS 
+   SELECT t1.AWB, 
+          t1.EPT,
+		  t1.Earliest,
+		  t1.Col1,
+		  t1.WeekEnding,
+		  t1.WeekNum
+      FROM WORK.MERGEDGEN_INDEX1 t1
+           INNER JOIN WORK.MERGEDGEN_34614 t2 ON (t1.AWB = t2.AWB)
+      WHERE t1.AWB = t2.AWB;
+QUIT;
+
+%means(means=EPT_GEN,var=EPT);
+data NP90EPT;
+set P90EPT;
+drop _freq_ _type_;
+run;
+
+PROC SQL;
+   CREATE TABLE MergedEPT_GEN AS 
+   SELECT t1.AWB, 
+          t1.EARLIEST, 
+          t1.COL1, 
+          t1.EPT,
+		t1.WeekEnding, 
+          t1.WeekNum, 
+          t2.EPT as P90GEN
+      FROM WORK.EPT_GEN t1
+           INNER JOIN NP90EPT t2 ON (t1.WeekNum = t2.WeekNum)
+      WHERE t1.WeekNum = t2.WeekNum;
+QUIT;
+
+*CPA;
+PROC SQL;
+   CREATE TABLE EPT_CPA AS 
+   SELECT t1.AWB, 
+          t1.EPT,
+		  t1.Earliest,
+		  t1.Col1,
+		  t1.WeekEnding,
+		  t1.WeekNum
+      FROM WORK.MERGEDCPA_INDEX3 t1
+           INNER JOIN WORK.MERGEDCPA_34616 t2 ON (t1.AWB = t2.AWB)
+      WHERE t1.AWB = t2.AWB;
+QUIT;
+
+%means(means=EPT_CPA,var=EPT);
+data NP90EPT;
+set P90EPT;
+drop _freq_ _type_;
+run;
+
+PROC SQL;
+   CREATE TABLE MergedEPT_CPA AS 
+   SELECT t1.AWB, 
+          t1.EARLIEST, 
+          t1.COL1, 
+          t1.EPT,
+		t1.WeekEnding, 
+          t1.WeekNum, 
+          t2.EPT as P90CPA
+      FROM WORK.EPT_CPA t1
+           INNER JOIN NP90EPT t2 ON (t1.WeekNum = t2.WeekNum)
+      WHERE t1.WeekNum = t2.WeekNum;
+QUIT;
+*FDA;
+PROC SQL;
+   CREATE TABLE EPT_FDA AS 
+   SELECT t1.AWB, 
+          t1.EPT,
+		  t1.Earliest,
+		  t1.Col1,
+		  t1.WeekEnding,
+		  t1.WeekNum
+      FROM WORK.MERGEDFDA_INDEX2 t1
+           INNER JOIN WORK.MERGEDFDA_34615 t2 ON (t1.AWB = t2.AWB)
+      WHERE t1.AWB = t2.AWB;
+QUIT;
+%means(means=EPT_FDA,var=EPT);
+data NP90EPT;
+set P90EPT;
+drop _freq_ _type_;
+run;
+
+PROC SQL;
+   CREATE TABLE MergedEPT_FDA AS 
+   SELECT t1.AWB, 
+          t1.EARLIEST, 
+          t1.COL1, 
+          t1.EPT,
+		t1.WeekEnding, 
+          t1.WeekNum, 
+          t2.EPT as P90FDA
+      FROM WORK.EPT_FDA t1
+           INNER JOIN NP90EPT t2 ON (t1.WeekNum = t2.WeekNum)
+      WHERE t1.WeekNum = t2.WeekNum;
+QUIT;
+
+/*data ZeroTemp;
+set BRKGVA.ZeroMiss;
+WeekNum=Week(Earliest);
+WeekEnding= put(intnx('Week',Earliest,0,'e'),date9.);
+run;
+
+proc sort data= ZeroTemp;
+by WeekEnding;
+run;
+
+proc means data= ZeroTemp;
+by WeekEnding;
+var CPA_3461 CPA_INDEX CPA_SI FDA_3461 FDA_SI FDA_INDEX GEN_INDEX GEN_3461 GEN_SI;
+run;*/
+
+
